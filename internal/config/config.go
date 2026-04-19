@@ -43,6 +43,7 @@ type DockerConfig struct {
 	Registry string `yaml:"registry,omitempty"`
 	Image    string `yaml:"image,omitempty"`
 	Port     int    `yaml:"port,omitempty"`
+	Template string `yaml:"template,omitempty"` // spa | nextjs | node-ssr
 }
 
 func (c *Config) Validate() error {
@@ -62,7 +63,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server.method must be 'ssh' or 'ssm'")
 	}
 	if c.Framework != "" && !isValidFramework(c.Framework) {
-		return fmt.Errorf("invalid framework: %s (must be vite, nextjs, react, or static)", c.Framework)
+		return fmt.Errorf("invalid framework: %s (must be vite, nextjs, react, react-cra, astro, sveltekit, nuxt, remix, static, or unknown)", c.Framework)
 	}
 	return nil
 }
@@ -88,7 +89,11 @@ func (c *Config) SetDefaults() {
 		switch c.Framework {
 		case "nextjs":
 			c.Build.Output = ".next"
-		case "react":
+		case "react", "react-cra":
+			c.Build.Output = "build"
+		case "nuxt":
+			c.Build.Output = ".output"
+		case "sveltekit":
 			c.Build.Output = "build"
 		default:
 			c.Build.Output = "dist"
@@ -102,8 +107,14 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Nginx.Template == "" {
 		switch c.Framework {
-		case "nextjs":
+		case "nextjs", "nuxt", "remix":
 			c.Nginx.Template = "ssr"
+		case "sveltekit":
+			// SvelteKit depends on adapter; default to SSR
+			c.Nginx.Template = "ssr"
+		case "astro":
+			// Astro depends on adapter; default to static
+			c.Nginx.Template = "spa"
 		default:
 			c.Nginx.Template = "spa"
 		}
@@ -121,7 +132,8 @@ func (c *Config) SetDefaults() {
 
 func isValidFramework(f string) bool {
 	switch f {
-	case "vite", "nextjs", "react", "static":
+	case "vite", "nextjs", "react", "react-cra", "static",
+		"astro", "sveltekit", "nuxt", "remix", "unknown":
 		return true
 	}
 	return false

@@ -3,8 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/anuragvishwa/pushsite/internal/docker"
+	"github.com/anuragvishwa/pushsite/internal/fingerprint"
 	"github.com/spf13/cobra"
 )
 
@@ -27,19 +29,71 @@ var dockerGenerateCmd = &cobra.Command{
 	Use:   "generate",
 	Short: "Generate a Dockerfile for your project",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		content, err := docker.GenerateDockerfile(cfg.Framework, cfg.Build.Command, cfg.Build.Output)
+		// Run fingerprint detection
+		workDir, err := os.Getwd()
 		if err != nil {
 			return err
 		}
 
+		output.Title("🔍 Detecting project...")
+		output.NewLine()
+
+		fp := fingerprint.Detect(workDir)
+
+		// Show detection summary
+		output.Print("  Framework:       %s", fp.Framework)
+		output.Print("  Runtime:         %s", fp.RuntimeType)
+		output.Print("  Package manager: %s", fp.PackageManager)
+		if fp.BuildCommand != "" {
+			output.Print("  Build:           %s → %s", fp.BuildCommand, fp.OutputDir)
+		}
+		if fp.StartCommand != "" {
+			output.Print("  Start:           %s", fp.StartCommand)
+		}
+		output.Print("  Docker strategy: %s", fp.DockerStrategyLabel())
+		output.Print("  Confidence:      %d%% (%s)", fp.Confidence, fp.ConfidenceLabel())
+		output.NewLine()
+
+		// Show evidence
+		if len(fp.Evidence) > 0 {
+			output.Print("  Evidence:")
+			for _, e := range fp.Evidence {
+				output.Print("    %s", e)
+			}
+			output.NewLine()
+		}
+
+		// Warn if confidence is low
+		if fp.Confidence < 40 {
+			output.Warn("Low confidence detection — review the generated Dockerfile carefully")
+		}
+
+		// Check for existing Dockerfile
 		dockerfilePath := "Dockerfile"
-		if _, err := os.Stat(dockerfilePath); err == nil {
-			overwrite, err := output.Confirm("Dockerfile already exists. Overwrite?", false)
-			if err != nil || !overwrite {
-				output.Info("Aborted")
+		if fp.HasDockerfile {
+			output.Warn("Dockerfile already exists")
+			_, choice, err := output.Select("What to do?", []string{
+				"Overwrite with Pushsite optimized Dockerfile",
+				"Keep existing Dockerfile",
+			})
+			if err != nil {
+				return err
+			}
+			if strings.Contains(choice, "Keep") {
+				output.Info("Keeping existing Dockerfile")
 				return nil
 			}
 		}
+
+		// Generate from fingerprint
+		content, err := docker.GenerateFromFingerprint(fp)
+		if err != nil {
+			return err
+		}
+
+		// Preview
+		output.Title("📄 Generated Dockerfile")
+		output.Print(content)
 
 		if err := os.WriteFile(dockerfilePath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("failed to write Dockerfile: %w", err)

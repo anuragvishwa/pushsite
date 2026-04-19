@@ -1,13 +1,13 @@
 package scanner
 
 import (
-	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/anuragvishwa/pushsite/internal/framework"
+	"github.com/anuragvishwa/pushsite/internal/fingerprint"
 )
 
 // ProjectInfo holds everything we can detect from the project root
@@ -18,7 +18,7 @@ type ProjectInfo struct {
 	Version     string
 
 	// Framework & Build
-	Framework  framework.Framework
+	Framework  string
 	BuildCmd   string
 	OutputDir  string
 	IsSSR      bool
@@ -54,6 +54,9 @@ type ProjectInfo struct {
 
 	// Files found
 	ConfigFiles []string
+
+	// Fingerprint — full detection result with scoring and evidence
+	Fingerprint *fingerprint.ProjectFingerprint
 }
 
 // Scan inspects the project directory and returns everything it can detect
@@ -64,45 +67,47 @@ func Scan(dir string) *ProjectInfo {
 		Port:       3000,
 	}
 
-	// 1. Framework detection
-	fw := framework.Detect(dir)
-	info.Framework = fw.Name
-	info.BuildCmd = fw.BuildCmd
-	info.OutputDir = fw.OutputDir
-	info.IsSSR = fw.IsSSR
-	info.HasTS = fw.HasTypeScript
+	// 1. Fingerprint-based detection (scoring system)
+	fp := fingerprint.Detect(dir)
+	info.Fingerprint = fp
 
-	// 2. Package.json deep scan
+	// Map fingerprint to legacy fields for backward compatibility
+	info.Framework = string(fp.Framework)
+	info.BuildCmd = fp.BuildCommand
+	info.OutputDir = fp.OutputDir
+	info.IsSSR = fp.RuntimeType == fingerprint.RuntimeSSR
+	info.PackageManager = fp.PackageManager
+	info.NodeVersion = fp.NodeVersion
+	info.HasDockerfile = fp.HasDockerfile
+
+	// 2. Package.json deep scan (name, version, env, TypeScript)
 	info.scanPackageJSON(dir)
 
-	// 3. Package manager detection
-	info.detectPackageManager(dir)
+	// 3. Lock file detection (for LockFile field)
+	info.detectLockFile(dir)
 
-	// 4. Node version detection
-	info.detectNodeVersion(dir)
-
-	// 5. Environment files
+	// 4. Environment files
 	info.scanEnvFiles(dir)
 
-	// 6. Git info
+	// 5. Git info
 	info.scanGit(dir)
 
-	// 7. Docker
+	// 6. Docker compose
 	info.scanDocker(dir)
 
-	// 8. CI/CD
+	// 7. CI/CD
 	info.scanCI(dir)
 
-	// 9. Config files
+	// 8. Config files
 	info.scanConfigFiles(dir)
 
-	// 10. Port detection
+	// 9. Port detection
 	info.detectPort(dir)
 
 	return info
 }
 
-// scanPackageJSON extracts name, version, scripts, etc.
+// scanPackageJSON extracts name, version, description, TypeScript info
 func (p *ProjectInfo) scanPackageJSON(dir string) {
 	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
 	if err != nil {
@@ -113,12 +118,8 @@ func (p *ProjectInfo) scanPackageJSON(dir string) {
 		Name            string            `json:"name"`
 		Version         string            `json:"version"`
 		Description     string            `json:"description"`
-		Scripts         map[string]string `json:"scripts"`
 		Dependencies    map[string]string `json:"dependencies"`
 		DevDependencies map[string]string `json:"devDependencies"`
-		Engines         struct {
-			Node string `json:"node"`
-		} `json:"engines"`
 	}
 
 	if json.Unmarshal(data, &pkg) != nil {
@@ -135,32 +136,14 @@ func (p *ProjectInfo) scanPackageJSON(dir string) {
 		p.Description = pkg.Description
 	}
 
-	// Get the actual build command from scripts
-	if buildScript, ok := pkg.Scripts["build"]; ok {
-		p.BuildCmd = detectBuildRunner(p.PackageManager) + " run build"
-		// Detect output from the build script content
-		if strings.Contains(buildScript, "vite") {
-			p.OutputDir = "dist"
-		} else if strings.Contains(buildScript, "next") {
-			p.OutputDir = ".next"
-		} else if strings.Contains(buildScript, "react-scripts") {
-			p.OutputDir = "build"
-		}
-	}
-
-	// Node version from engines
-	if pkg.Engines.Node != "" {
-		p.NodeVersion = pkg.Engines.Node
-	}
-
 	// TypeScript check
 	if _, ok := pkg.DevDependencies["typescript"]; ok {
 		p.HasTS = true
 	}
 }
 
-// detectPackageManager checks for lock files to determine the package manager
-func (p *ProjectInfo) detectPackageManager(dir string) {
+// detectLockFile sets the LockFile field based on which lock file exists
+func (p *ProjectInfo) detectLockFile(dir string) {
 	lockFiles := []struct {
 		file    string
 		manager string
@@ -173,60 +156,13 @@ func (p *ProjectInfo) detectPackageManager(dir string) {
 
 	for _, lf := range lockFiles {
 		if fileExists(dir, lf.file) {
-			p.PackageManager = lf.manager
 			p.LockFile = lf.file
-
-			// Update build command to use the right runner
-			if p.BuildCmd != "" {
-				p.BuildCmd = detectBuildRunner(lf.manager) + " run build"
-			}
 			return
 		}
 	}
-
-	// Default to npm if package.json exists
-	if fileExists(dir, "package.json") {
-		p.PackageManager = "npm"
-	}
 }
 
-// detectNodeVersion checks .nvmrc, .node-version, .tool-versions
-func (p *ProjectInfo) detectNodeVersion(dir string) {
-	// Already got from package.json engines? skip
-	if p.NodeVersion != "" {
-		return
-	}
 
-	versionFiles := []string{".nvmrc", ".node-version"}
-	for _, f := range versionFiles {
-		content, err := os.ReadFile(filepath.Join(dir, f))
-		if err == nil {
-			ver := strings.TrimSpace(string(content))
-			ver = strings.TrimPrefix(ver, "v")
-			if ver != "" {
-				p.NodeVersion = ver
-				return
-			}
-		}
-	}
-
-	// Check .tool-versions (asdf)
-	toolVersions := filepath.Join(dir, ".tool-versions")
-	if f, err := os.Open(toolVersions); err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "nodejs") || strings.HasPrefix(line, "node") {
-				parts := strings.Fields(line)
-				if len(parts) >= 2 {
-					p.NodeVersion = parts[1]
-					return
-				}
-			}
-		}
-	}
-}
 
 // scanEnvFiles finds .env, .env.example, .env.production, etc.
 func (p *ProjectInfo) scanEnvFiles(dir string) {
@@ -348,25 +284,18 @@ func (p *ProjectInfo) scanConfigFiles(dir string) {
 
 // detectPort tries to figure out the dev/production port
 func (p *ProjectInfo) detectPort(dir string) {
-	switch p.Framework {
-	case framework.NextJS:
+	if p.IsSSR {
 		p.Port = 3000
-	case framework.Vite:
+		return
+	}
+
+	switch p.Framework {
+	case "nextjs", "nuxt", "remix", "sveltekit":
+		p.Port = 3000
+	case "vite":
 		p.Port = 5173 // vite dev default, but production is usually 80
 	default:
 		p.Port = 3000
-	}
-
-	// Check for port in common config files
-	for _, f := range []string{"vite.config.js", "vite.config.ts"} {
-		content, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			continue
-		}
-		s := string(content)
-		if strings.Contains(s, "port:") || strings.Contains(s, "port =") {
-			// Could parse, but the default is fine for now
-		}
 	}
 }
 
@@ -374,7 +303,10 @@ func (p *ProjectInfo) detectPort(dir string) {
 func (p *ProjectInfo) Summary() []string {
 	var lines []string
 	lines = append(lines, "Project: "+p.Name)
-	lines = append(lines, "Framework: "+string(p.Framework))
+	lines = append(lines, "Framework: "+p.Framework)
+	if p.Fingerprint != nil {
+		lines = append(lines, "Runtime: "+string(p.Fingerprint.RuntimeType))
+	}
 	if p.PackageManager != "" {
 		lines = append(lines, "Package Manager: "+p.PackageManager)
 	}
@@ -386,6 +318,9 @@ func (p *ProjectInfo) Summary() []string {
 	}
 	if p.HasTS {
 		lines = append(lines, "TypeScript: yes")
+	}
+	if p.Fingerprint != nil {
+		lines = append(lines, "Docker strategy: "+p.Fingerprint.DockerStrategyLabel())
 	}
 	if p.HasGit {
 		branch := p.GitBranch
@@ -403,21 +338,13 @@ func (p *ProjectInfo) Summary() []string {
 	if p.HasGitHubActions {
 		lines = append(lines, "CI: GitHub Actions found")
 	}
+	if p.Fingerprint != nil {
+		lines = append(lines, fmt.Sprintf("Confidence: %d%% (%s)", p.Fingerprint.Confidence, p.Fingerprint.ConfidenceLabel()))
+	}
 	return lines
 }
 
-func detectBuildRunner(pm string) string {
-	switch pm {
-	case "yarn":
-		return "yarn"
-	case "pnpm":
-		return "pnpm"
-	case "bun":
-		return "bun"
-	default:
-		return "npm"
-	}
-}
+
 
 func fileExists(dir, name string) bool {
 	_, err := os.Stat(filepath.Join(dir, name))

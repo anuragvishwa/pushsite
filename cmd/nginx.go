@@ -1,10 +1,6 @@
 package cmd
 
 import (
-	"fmt"
-
-	"github.com/anuragvishwa/pushsite/internal/connection"
-	"github.com/anuragvishwa/pushsite/internal/connector"
 	"github.com/anuragvishwa/pushsite/internal/nginx"
 	"github.com/spf13/cobra"
 )
@@ -132,24 +128,4 @@ var nginxShowCmd = &cobra.Command{
 func init() {
 	nginxCmd.AddCommand(nginxGenerateCmd, nginxDeployCmd, nginxTestCmd, nginxReloadCmd, nginxShowCmd)
 	rootCmd.AddCommand(nginxCmd)
-}
-
-// connectToServer is a helper to establish a connection
-func connectToServer() (connection.Connection, error) {
-	connCfg := &connection.Config{
-		Host:       cfg.Server.Host,
-		User:       cfg.Server.User,
-		KeyPath:    cfg.Server.Key,
-		Port:       cfg.Server.Port,
-		Method:     cfg.Server.Method,
-		InstanceID: cfg.Server.InstanceID,
-	}
-	conn, err := connector.New(connCfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create connection: %w", err)
-	}
-	if err := conn.Connect(); err != nil {
-		return nil, fmt.Errorf("connection failed: %w", err)
-	}
-	return conn, nil
 }

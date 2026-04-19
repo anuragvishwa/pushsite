@@ -2,13 +2,14 @@
 
 > Deploy frontend apps to EC2 in one command.
 
-Pushsite is a CLI tool for deploying frontend applications (Vite, Next.js, React, static sites) to EC2 instances. It auto-detects your project, generates config, handles nginx, SSL, and supports two deployment strategies: **static file upload** or **Docker containers**.
+Pushsite is a CLI tool for deploying frontend applications to EC2 instances. It fingerprints your project using a scoring system — detecting framework, runtime type, and package manager — then automatically generates the right Dockerfile, handles nginx, SSL, and supports two deployment strategies: **static file upload** or **Docker containers**.
 
 ## Features
 
 - 🚀 **One-command deploy** — `pushsite deploy` builds and ships your app
 - 🔍 **Smart project scanner** — Auto-detects framework, package manager, Node version, env vars, and more from your project root
-- 🐳 **Docker deployment** — Build locally → push to registry → pull on server. Server stays clean.
+- 🧬 **Framework fingerprinting** — Scoring-based detection of 8 frameworks with confidence levels, runtime type inference, and automatic Docker strategy selection
+- 🐳 **Docker deployment** — Auto-generates the right Dockerfile (SPA, Next.js standalone, Node SSR) based on your project fingerprint
 - 📁 **Zero-downtime releases** — Capistrano-style timestamped releases with symlinks
 - 🔑 **Dual connection** — SSH (with SFTP) or AWS SSM
 - ⏪ **Instant rollback** — `pushsite rollback` to revert in seconds
@@ -71,21 +72,29 @@ pushsite deploy
 
 ## Smart Project Scanner
 
-When you run `pushsite init`, it scans your project root and **auto-detects everything**:
+When you run `pushsite init`, it scans your project root using a **scoring-based fingerprint system** and auto-detects everything:
 
 ```
 🔍 Scanning project...
 
 📋 Detected Project Info
 
-  Project: my-dashboard          ← from package.json
-  Framework: vite                ← from vite.config.ts
-  Package Manager: pnpm          ← from pnpm-lock.yaml
-  Node Version: >=20.0.0         ← from engines / .nvmrc
-  Build: pnpm run build → dist   ← correct PM + output dir
-  TypeScript: yes                ← from devDependencies
-  Git Branch: main               ← from .git/HEAD
-  Env Files: .env.example        ← found env file
+  Project: my-dashboard
+  Framework: vite
+  Runtime: static
+  Package Manager: pnpm
+  Node Version: >=20.0.0
+  Build: pnpm run build → dist
+  TypeScript: yes
+  Docker strategy: multi-stage static nginx
+  Git Branch: main
+  Env Files: .env.example
+  Confidence: 92% (high)
+
+  Evidence:
+    [vite +30] found config file: vite.config.ts
+    [vite +15] found vite in devDeps: vite
+    [vite +10] build script contains 'vite'
 
 🌐 Server Details
 → Everything else was auto-detected — just need your server info.
@@ -101,7 +110,9 @@ When you run `pushsite init`, it scans your project root and **auto-detects ever
 | What it detects | Where it looks |
 |----------------|----------------|
 | Project name & version | `package.json` |
-| Framework | `vite.config.ts`, `next.config.js`, deps |
+| Framework | Config files, dependencies, build scripts (scored) |
+| Runtime type | Static SPA / SSR Node / Hybrid export |
+| Docker strategy | Auto-selected from framework + runtime |
 | Package manager | `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, `package-lock.json` |
 | Node version | `.nvmrc`, `.node-version`, `.tool-versions`, `engines` |
 | Build command | Scripts + detected PM (`pnpm run build`) |
@@ -110,9 +121,65 @@ When you run `pushsite init`, it scans your project root and **auto-detects ever
 | Git info | `.git/HEAD`, `.git/config` |
 | Docker | `Dockerfile`, `docker-compose.yml` |
 | CI/CD | `.github/workflows`, `.gitlab-ci.yml` |
-| Config files | `tsconfig.json`, `tailwind.config.js`, `eslint`, etc. |
+| Monorepo | `workspaces`, `pnpm-workspace.yaml`, `turbo.json`, `lerna.json` |
 
 Only your **server details and domain** need manual input — everything else is pre-filled.
+
+---
+
+## Framework Fingerprinting
+
+Pushsite uses a **weighted scoring system** to detect your framework — not simple filename matching.
+
+### Detection order
+
+1. **Explicit override** — If set in `pushsite.yaml`, trust that first
+2. **Existing Dockerfile** — Asks: use existing, or generate Pushsite one?
+3. **Framework config files** (weight: 30) — `next.config.ts`, `vite.config.ts`, `astro.config.mjs`, etc.
+4. **package.json deps + scripts** (weight: 15) — `next`, `vite`, `react-scripts`, `@sveltejs/kit`, etc.
+5. **Folder conventions** (weight: 5) — `pages/`, `app/`, `src/routes/` — tie-breaker only
+
+### Runtime shape detection
+
+The same framework can have different runtime types. Pushsite detects this:
+
+| Framework | Possible runtimes | How it decides |
+|-----------|------------------|----------------|
+| Next.js | SSR, static export | `output: "export"` in next.config → static; otherwise SSR |
+| Astro | Static, SSR | `@astrojs/node` adapter present → SSR |
+| SvelteKit | Static, SSR | `@sveltejs/adapter-static` → static; `adapter-node` → SSR |
+| Nuxt | SSR | Always SSR |
+| Remix | SSR | Always SSR |
+| Vite | Static SPA | Always static |
+| React CRA | Static SPA | Always static |
+
+### Docker strategy auto-selection
+
+Once runtime is known, Pushsite picks the right Dockerfile template:
+
+| Runtime | Docker template | What it does |
+|---------|----------------|-------------|
+| Static SPA | `spa` | Build in Node → copy to `nginx:alpine` |
+| Next.js SSR | `nextjs` | 3-stage build → standalone server on port 3000 |
+| Node SSR | `node-ssr` | 3-stage build → `node:slim` runner |
+| Static export | `spa` | Same as SPA (static files served by nginx) |
+
+All generated Dockerfiles are **package-manager-aware**:
+
+| PM | Install command | Lock file copied |
+|----|----------------|------------------|
+| npm | `npm ci` | `package*.json` |
+| pnpm | `corepack enable && pnpm install --frozen-lockfile` | `pnpm-lock.yaml` |
+| yarn | `yarn install --frozen-lockfile` | `yarn.lock` |
+| bun | `npm i -g bun && bun install --frozen-lockfile` | `bun.lockb` |
+
+### Monorepo support
+
+If the repo has `workspaces`, `pnpm-workspace.yaml`, `turbo.json`, or `lerna.json`, Pushsite scans subfolders and ranks candidates:
+
+- Scans `apps/`, `packages/`, `frontend/`, `client/`, `web/`
+- Prefers folders with both `package.json` and a framework config file
+- Reports how many apps were found
 
 ---
 
@@ -153,9 +220,11 @@ Server structure:
 
 Builds a Docker image locally, pushes to a registry, pulls on the server. **The server stays clean** — no Node.js, no build tools, just Docker.
 
+Pushsite auto-detects your project and generates the right Dockerfile:
+
 ```bash
 # One-time setup
-pushsite docker generate   # Generate Dockerfile
+pushsite docker generate   # Auto-detect + generate optimized Dockerfile
 pushsite docker setup      # Install Docker + nginx on server
 
 # Deploy
@@ -163,6 +232,12 @@ pushsite docker deploy
 ```
 
 ```
+pushsite docker generate
+├── 1. Fingerprint project (framework, runtime, PM)
+├── 2. Select Docker template (spa / nextjs / node-ssr)
+├── 3. Generate PM-aware Dockerfile
+└── 4. Preview and write
+
 pushsite docker deploy
 ├── 1. Build Docker image locally
 ├── 2. Push to registry (or SSH transfer)
@@ -172,7 +247,26 @@ pushsite docker deploy
 └── 6. Nginx reverse-proxies to container
 ```
 
-Two modes:
+Example `docker generate` output:
+```
+🔍 Detecting project...
+
+  Framework:       vite
+  Runtime:         static
+  Package manager: pnpm
+  Build:           pnpm run build → dist
+  Docker strategy: multi-stage static nginx
+  Confidence:      92% (high)
+
+  Evidence:
+    [vite +30] found config file: vite.config.ts
+    [vite +15] found vite in devDeps: vite
+    [vite +10] build script contains 'vite'
+
+✓ Generated Dockerfile
+```
+
+Two transfer modes:
 
 | Mode | Config | How it works |
 |------|--------|-------------|
@@ -186,6 +280,7 @@ docker:
   registry: ghcr.io/myuser   # Docker Hub, GHCR, ECR — or omit
   image: my-app
   port: 80
+  template: spa              # auto-detected: spa | nextjs | node-ssr
 ```
 
 ---
@@ -196,7 +291,7 @@ docker:
 
 ```yaml
 name: my-app
-framework: vite
+framework: vite             # auto-detected with confidence scoring
 domain: myapp.example.com
 
 server:
@@ -206,7 +301,7 @@ server:
   method: ssh              # ssh | ssm
 
 build:
-  command: pnpm run build  # auto-detected
+  command: pnpm run build  # auto-detected PM + build script
   output: dist
 
 env:
@@ -217,13 +312,14 @@ deploy:
   keep_releases: 5
 
 nginx:
-  template: spa            # spa | ssr
+  template: spa            # spa | ssr (auto from runtime type)
 
-# Optional: Docker deployment
+# Docker deployment
 docker:
   enabled: true
   registry: ghcr.io/myuser
   port: 80
+  template: spa            # auto-detected: spa | nextjs | node-ssr
 ```
 
 ---
@@ -247,7 +343,7 @@ docker:
 
 | Command | Description |
 |---------|-------------|
-| `pushsite docker generate` | Generate a Dockerfile |
+| `pushsite docker generate` | Auto-detect project + generate optimized Dockerfile |
 | `pushsite docker setup` | Install Docker + nginx reverse-proxy on server |
 | `pushsite docker deploy` | Build → push → pull → run |
 | `pushsite docker status` | Check container health |
@@ -299,12 +395,19 @@ server:
 
 ## Framework Support
 
-| Framework | Build Output | Nginx | SSR | Package Manager |
-|-----------|-------------|-------|-----|-----------------|
-| Vite | `dist/` | SPA | No | auto-detected |
-| React (CRA) | `build/` | SPA | No | auto-detected |
-| Next.js | `.next/` | Reverse proxy | Yes | auto-detected |
-| Static | `.` | SPA | No | — |
+| Framework | Build Output | Runtime | Docker Template | Detection |
+|-----------|-------------|---------|----------------|-----------|
+| Vite | `dist/` | Static SPA | `spa` (nginx) | `vite.config.*` or vite dep |
+| React (CRA) | `build/` | Static SPA | `spa` (nginx) | `react-scripts` dep |
+| Next.js (SSR) | `.next/` | SSR Node | `nextjs` (standalone) | `next.config.*` or next dep |
+| Next.js (export) | `out/` | Static | `spa` (nginx) | `output: "export"` in config |
+| Astro (static) | `dist/` | Static | `spa` (nginx) | `astro.config.*` |
+| Astro (SSR) | `dist/` | SSR Node | `node-ssr` | `@astrojs/node` adapter |
+| SvelteKit (static) | `build/` | Static | `spa` (nginx) | `@sveltejs/adapter-static` |
+| SvelteKit (SSR) | `build/` | SSR Node | `node-ssr` | `@sveltejs/adapter-node` |
+| Nuxt | `.output/` | SSR Node | `node-ssr` | `nuxt.config.*` or nuxt dep |
+| Remix | `build/` | SSR Node | `node-ssr` | `remix.config.js` or remix deps |
+| Static HTML | `.` | Static | `spa` (nginx) | `index.html` in root |
 
 Pushsite detects your package manager from lock files:
 
@@ -333,7 +436,7 @@ Creates `.github/workflows/deploy.yml` for auto-deploy on push to `main`.
 
 ```bash
 make build       # Build binary
-make test        # Run 53 unit tests
+make test        # Run unit tests (85+)
 make install     # Install to /usr/local/bin
 make cross       # Cross-compile all platforms
 ```
@@ -362,16 +465,17 @@ pushsite/
 │   ├── status.go            # Deployment status
 │   └── version.go           # Version info
 ├── internal/                # Core packages
-│   ├── scanner/             # Smart project scanner
+│   ├── fingerprint/         # Framework fingerprinting (scoring system)
+│   ├── scanner/             # Smart project scanner (uses fingerprint)
 │   ├── config/              # YAML config
 │   ├── connection/          # Connection interface
 │   ├── connector/           # SSH/SSM factory
 │   ├── ssh/                 # SSH + SFTP
 │   ├── ssm/                 # AWS SSM + S3
 │   ├── deploy/              # Deployer + release manager
-│   ├── docker/              # Docker build/push/run
+│   ├── docker/              # Docker build/push/run + template gen
 │   ├── build/               # Local build runner
-│   ├── framework/           # Framework detection
+│   ├── framework/           # Legacy framework detection (deprecated)
 │   ├── nginx/               # Nginx config generator
 │   ├── ssl/                 # Certbot
 │   ├── provision/           # Server setup
@@ -380,7 +484,7 @@ pushsite/
 │   ├── ci/                  # CI workflow gen
 │   ├── rollback/            # Rollback ops
 │   └── ui/                  # Colors, spinners, prompts
-└── templates/               # Nginx, Docker, CI templates
+└── templates/               # Nginx, Docker (spa/nextjs/node-ssr), CI
 ```
 
 ## License

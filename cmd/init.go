@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"github.com/anuragvishwa/pushsite/internal/config"
-	"github.com/anuragvishwa/pushsite/internal/framework"
+	"github.com/anuragvishwa/pushsite/internal/discovery"
+	"github.com/anuragvishwa/pushsite/internal/fingerprint"
 	"github.com/anuragvishwa/pushsite/internal/scanner"
+	"github.com/anuragvishwa/pushsite/internal/target"
 	"github.com/spf13/cobra"
 )
 
@@ -67,10 +69,28 @@ func runInit(cmd *cobra.Command, args []string) error {
 	for _, line := range project.Summary() {
 		output.Print("  %s", line)
 	}
+
+	// Show evidence if fingerprint available
+	fp := project.Fingerprint
+	if fp != nil && len(fp.Evidence) > 0 {
+		output.NewLine()
+		output.Print("  Evidence:")
+		for _, e := range fp.Evidence {
+			output.Print("    %s", e)
+		}
+	}
 	output.NewLine()
 
 	// ---- Non-interactive mode ----
 	if initNonInteractive {
+		// Auto-accept if confidence high enough
+		if fp != nil && fp.Confidence >= 60 {
+			return saveConfigFromScan(project, cfgPath)
+		}
+		// Low confidence: still proceed but warn
+		if fp != nil {
+			output.Warn("Low confidence detection (%d%%) — review pushsite.yaml after creation", fp.Confidence)
+		}
 		return saveConfigFromScan(project, cfgPath)
 	}
 
@@ -95,10 +115,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Framework
-	frameworks := []string{"vite", "nextjs", "react", "static"}
+	frameworks := []string{"vite", "nextjs", "react-cra", "astro", "sveltekit", "nuxt", "remix", "static"}
 	defaultIdx := 0
+	detectedFw := string(project.Framework)
 	for i, f := range frameworks {
-		if f == string(project.Framework) {
+		if f == detectedFw {
 			defaultIdx = i
 			break
 		}
@@ -109,16 +130,85 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Connection method
-	_, method, err := output.Select("Connection method", []string{"ssh", "ssm"})
+	// Server connection — smart options
+	output.Title("🌐 Server Connection")
+	output.NewLine()
+
+	serverOptions := []string{"Enter SSH details manually", "Enter SSM details manually"}
+
+	// Check for saved targets
+	store, _ := target.Load("")
+	if store != nil && store.Count() > 0 {
+		serverOptions = append([]string{fmt.Sprintf("Use saved target (%d available)", store.Count())}, serverOptions...)
+	}
+
+	// Check for AWS
+	if discovery.HasAWSCredentials() {
+		serverOptions = append([]string{"Pick from AWS (scans EC2 instances)"}, serverOptions...)
+	}
+
+	_, serverChoice, err := output.Select("How to connect?", serverOptions)
 	if err != nil {
 		return err
 	}
 
 	var serverCfg config.ServerConfig
-	serverCfg.Method = method
 
-	if method == "ssh" {
+	switch {
+	case strings.Contains(serverChoice, "AWS"):
+		// Use the AWS discovery picker from target command
+		t, err := addFromAWS(store)
+		if err != nil {
+			return err
+		}
+		serverCfg.Method = t.Method
+		serverCfg.Host = t.Host
+		serverCfg.User = t.User
+		serverCfg.Key = t.Key
+		serverCfg.Port = t.Port
+		serverCfg.InstanceID = t.InstanceID
+
+		// Save as target for reuse
+		if store != nil {
+			store.Add(t)
+			output.Success("Saved as target: %s", t.Name)
+		}
+
+	case strings.Contains(serverChoice, "saved target"):
+		targets := store.List()
+		labels := make([]string, len(targets))
+		for i, t := range targets {
+			def := ""
+			if t.Name == store.Default {
+				def = " ← default"
+			}
+			labels[i] = fmt.Sprintf("%s (%s)%s", t.Name, t.Method, def)
+		}
+		idx, _, err := output.Select("Select target", labels)
+		if err != nil {
+			return err
+		}
+		t := targets[idx]
+		serverCfg.Method = t.Method
+		serverCfg.Host = t.Host
+		serverCfg.User = t.User
+		serverCfg.Key = t.Key
+		serverCfg.Port = t.Port
+		serverCfg.InstanceID = t.InstanceID
+
+	case strings.Contains(serverChoice, "SSM"):
+		serverCfg.Method = "ssm"
+		serverCfg.InstanceID, err = output.PromptRequired("EC2 Instance ID (i-xxxxxxxx)")
+		if err != nil {
+			return err
+		}
+		serverCfg.User, err = output.Prompt("SSH user", "ubuntu")
+		if err != nil {
+			return err
+		}
+
+	default: // SSH manual
+		serverCfg.Method = "ssh"
 		serverCfg.Host, err = output.PromptRequired("Server host (IP or hostname)")
 		if err != nil {
 			return err
@@ -132,11 +222,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		serverCfg.Port = 22
-	} else {
-		serverCfg.InstanceID, err = output.PromptRequired("EC2 Instance ID (i-xxxxxxxx)")
-		if err != nil {
-			return err
-		}
 	}
 
 	// Build command — pre-filled from scan
@@ -150,10 +235,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build output — pre-filled from scan
-	fw := framework.FrameworkFromString(selectedFramework)
 	outputDefault := project.OutputDir
 	if outputDefault == "" || outputDefault == "." {
-		outputDefault = framework.BuildOutput(fw)
+		outputDefault = "dist"
 	}
 	buildOutput, err := output.Prompt("Build output directory", outputDefault)
 	if err != nil {
@@ -177,9 +261,28 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Docker config
 	var dockerCfg config.DockerConfig
-	if project.HasDockerfile {
-		output.Info("Dockerfile detected")
-		dockerCfg.Enabled = true
+	if project.HasDockerfile && fp != nil {
+		output.NewLine()
+		output.Info("Existing Dockerfile found")
+		_, dockerChoice, err := output.Select("Docker strategy", []string{
+			"Use existing Dockerfile",
+			"Generate Pushsite optimized Dockerfile",
+			"Skip Docker",
+		})
+		if err != nil {
+			return err
+		}
+		switch {
+		case strings.Contains(dockerChoice, "existing"):
+			dockerCfg.Enabled = true
+		case strings.Contains(dockerChoice, "Generate"):
+			dockerCfg.Enabled = true
+			if fp != nil {
+				dockerCfg.Template = string(fp.DockerTemplate)
+			}
+		}
+	} else if fp != nil {
+		dockerCfg.Template = string(fp.DockerTemplate)
 	}
 
 	// Port
@@ -187,6 +290,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if project.IsSSR {
 		port = 3000
 	}
+
+	// Nginx template
+	nginxTemplate := selectNginxTemplate(selectedFramework, fp)
 
 	// Create config
 	newCfg := &config.Config{
@@ -204,7 +310,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			Strategy:     "rolling",
 		},
 		Nginx: config.NginxConfig{
-			Template: selectNginxTemplate(fw),
+			Template: nginxTemplate,
 			Port:     port,
 		},
 		Docker: dockerCfg,
@@ -244,8 +350,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 // saveConfigFromScan auto-fills from scan but still asks for server details
 func saveConfigFromScan(p *scanner.ProjectInfo, cfgPath string) error {
-	fw := framework.FrameworkFromString(string(p.Framework))
-
 	envVars := p.EnvVars
 	if envVars == nil {
 		envVars = make(map[string]string)
@@ -300,9 +404,16 @@ func saveConfigFromScan(p *scanner.ProjectInfo, cfgPath string) error {
 		port = 3000
 	}
 
+	// Nginx + Docker from fingerprint
+	nginxTemplate := selectNginxTemplate(p.Framework, p.Fingerprint)
+	var dockerCfg config.DockerConfig
+	if p.Fingerprint != nil {
+		dockerCfg.Template = string(p.Fingerprint.DockerTemplate)
+	}
+
 	newCfg := &config.Config{
 		Name:      p.Name,
-		Framework: string(p.Framework),
+		Framework: p.Framework,
 		Domain:    domain,
 		Server:    serverCfg,
 		Build: config.BuildConfig{
@@ -315,9 +426,10 @@ func saveConfigFromScan(p *scanner.ProjectInfo, cfgPath string) error {
 			Strategy:     "rolling",
 		},
 		Nginx: config.NginxConfig{
-			Template: selectNginxTemplate(fw),
+			Template: nginxTemplate,
 			Port:     port,
 		},
+		Docker: dockerCfg,
 	}
 
 	if err := config.Save(newCfg, cfgPath); err != nil {
@@ -352,9 +464,21 @@ func saveConfigFromScan(p *scanner.ProjectInfo, cfgPath string) error {
 	return nil
 }
 
-func selectNginxTemplate(fw framework.Framework) string {
-	if fw == framework.NextJS {
-		return "ssr"
+func selectNginxTemplate(fw string, fp *fingerprint.ProjectFingerprint) string {
+	// If fingerprint has runtime info, use that
+	if fp != nil {
+		switch fp.RuntimeType {
+		case fingerprint.RuntimeSSR:
+			return "ssr"
+		case fingerprint.RuntimeStatic, fingerprint.RuntimeHybrid:
+			return "spa"
+		}
 	}
-	return "spa"
+	// Fallback to framework string
+	switch fw {
+	case "nextjs", "nuxt", "remix", "sveltekit":
+		return "ssr"
+	default:
+		return "spa"
+	}
 }

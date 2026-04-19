@@ -10,6 +10,7 @@ import (
 
 	"github.com/anuragvishwa/pushsite/internal/config"
 	"github.com/anuragvishwa/pushsite/internal/connection"
+	"github.com/anuragvishwa/pushsite/internal/fingerprint"
 )
 
 // Deployer handles Docker-based deployments
@@ -124,8 +125,10 @@ func (d *Deployer) DeployToServer(imageTag string) error {
 	}
 	internalPort := port
 
-	// For Next.js, internal port is 3000
-	if d.cfg.Framework == "nextjs" {
+	// For SSR frameworks, internal port is 3000
+	if d.cfg.Docker.Template == "nextjs" || d.cfg.Docker.Template == "node-ssr" ||
+		d.cfg.Framework == "nextjs" || d.cfg.Framework == "nuxt" ||
+		d.cfg.Framework == "remix" || d.cfg.Framework == "sveltekit" {
 		internalPort = 3000
 	}
 
@@ -248,7 +251,9 @@ func (d *Deployer) runOnServer(imageTag string) error {
 		port = 80
 	}
 	internalPort := port
-	if d.cfg.Framework == "nextjs" {
+	if d.cfg.Docker.Template == "nextjs" || d.cfg.Docker.Template == "node-ssr" ||
+		d.cfg.Framework == "nextjs" || d.cfg.Framework == "nuxt" ||
+		d.cfg.Framework == "remix" || d.cfg.Framework == "sveltekit" {
 		internalPort = 3000
 	}
 
@@ -396,7 +401,7 @@ func NginxForDocker(appName, domain string, hostPort int) string {
 
 // ---- Dockerfile generation (unchanged) ----
 
-// GenerateDockerfile creates a Dockerfile for the project
+// GenerateDockerfile creates a Dockerfile for the project (legacy — use GenerateFromFingerprint for new code)
 func GenerateDockerfile(framework, buildCmd, outputDir string) (string, error) {
 	var tmplStr string
 	switch framework {
@@ -421,6 +426,11 @@ func GenerateDockerfile(framework, buildCmd, outputDir string) (string, error) {
 	}
 
 	return buf.String(), nil
+}
+
+// GenerateFromFingerprint creates a Dockerfile using the full project fingerprint
+func GenerateFromFingerprint(fp *fingerprint.ProjectFingerprint) (string, error) {
+	return fp.GenerateDockerfile()
 }
 
 var spaDockerfileTemplate = `FROM node:20-alpine AS builder

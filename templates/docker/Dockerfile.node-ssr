@@ -1,0 +1,21 @@
+FROM node:{{.NodeVersion}}-alpine AS deps
+WORKDIR /app
+{{.LockFileCopy}}
+RUN {{.InstallCmd}}
+
+FROM node:{{.NodeVersion}}-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN {{.BuildCmd}}
+
+FROM node:{{.NodeVersion}}-slim AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY --from=builder /app/{{.OutputDir}} ./{{.OutputDir}}
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+
+EXPOSE {{.Port}}
+CMD {{.StartCmd}}
