@@ -198,12 +198,36 @@ pushsite deploy
 ├── 1. Detect framework (Vite/Next.js/React/static)
 ├── 2. Run build locally (npm/pnpm/yarn run build)
 ├── 3. Connect via SSH or SSM
-├── 4. Create timestamped release directory
-├── 5. Upload build artifacts via SFTP
-├── 6. Sync environment variables
-├── 7. Update symlink: current → new release
-├── 8. Reload nginx
-└── 9. Cleanup old releases
+├── 4. Preflight checks
+│   ├── nginx installed and running?
+│   ├── port 80 owned by nginx? (not Apache, Docker, etc.)
+│   ├── port 443 owned by nginx?
+│   ├── nginx config exists for this site?
+│   ├── site enabled in sites-enabled?
+│   ├── domain in nginx config?
+│   └── SSL certificate present?
+├── 5. Deploy (upload, symlink, reload nginx)
+├── 6. Post-deploy verification
+│   ├── nginx -t (config valid?)
+│   ├── symlink active?
+│   ├── SSL cert present?
+│   └── HTTP/HTTPS health check (is the URL reachable?)
+└── 7. Done — show URL + any warnings
+```
+
+Example with issues:
+```
+🚀 Deploying agent-eval-frontend
+
+[4/7] Preflight checks...
+⚠  No nginx config for 'agent-eval-frontend' — run: pushsite nginx generate && pushsite nginx deploy
+⚠  No SSL certificate for 'agentf.lumniverse.com' — run: pushsite ssl obtain
+
+[6/7] Verifying deployment...
+✓ nginx config: valid
+✓ symlink: active
+⚠  no SSL for agentf.lumniverse.com — run: pushsite ssl obtain
+⚠  site not reachable at agentf.lumniverse.com — check DNS, nginx, and SSL
 ```
 
 Server structure:
