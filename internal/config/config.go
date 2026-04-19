@@ -39,11 +39,14 @@ type NginxConfig struct {
 }
 
 type DockerConfig struct {
-	Enabled  bool   `yaml:"enabled,omitempty"`
-	Registry string `yaml:"registry,omitempty"`
-	Image    string `yaml:"image,omitempty"`
-	Port     int    `yaml:"port,omitempty"`
-	Template string `yaml:"template,omitempty"` // spa | nextjs | node-ssr
+	Enabled       bool   `yaml:"enabled,omitempty"`
+	Registry      string `yaml:"registry,omitempty"`
+	Image         string `yaml:"image,omitempty"`
+	Port          int    `yaml:"port,omitempty"`           // deprecated: use container_port
+	Template      string `yaml:"template,omitempty"`       // spa | nextjs | node-ssr
+	HostPort      int    `yaml:"host_port,omitempty"`      // localhost port (auto-allocated 18000-19999)
+	ContainerPort int    `yaml:"container_port,omitempty"` // port the app exposes inside container (80 or 3000)
+	Platform      string `yaml:"platform,omitempty"`       // target arch e.g. linux/amd64
 }
 
 func (c *Config) Validate() error {
@@ -124,6 +127,23 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Docker.Port == 0 {
 		c.Docker.Port = 80
+	}
+	// ContainerPort: what the app exposes inside the container
+	if c.Docker.ContainerPort == 0 {
+		if c.Docker.Port != 0 && c.Docker.Port != 80 {
+			c.Docker.ContainerPort = c.Docker.Port
+		} else {
+			switch c.Framework {
+			case "nextjs", "nuxt", "remix", "sveltekit":
+				c.Docker.ContainerPort = 3000
+			default:
+				c.Docker.ContainerPort = 80
+			}
+		}
+	}
+	// Platform: default to linux/amd64 (most EC2 instances)
+	if c.Docker.Platform == "" {
+		c.Docker.Platform = "linux/amd64"
 	}
 	if c.Env == nil {
 		c.Env = make(map[string]string)

@@ -16,11 +16,16 @@ type Registry struct {
 
 // SiteEntry represents a registered site
 type SiteEntry struct {
-	Name      string `yaml:"name"`
-	Domain    string `yaml:"domain"`
-	Path      string `yaml:"path"` // local project path
-	Host      string `yaml:"host"`
-	Framework string `yaml:"framework"`
+	Name          string `yaml:"name"`
+	Domain        string `yaml:"domain"`
+	Path          string `yaml:"path"`           // local project path
+	Host          string `yaml:"host"`
+	Framework     string `yaml:"framework"`
+	DeployMode    string `yaml:"deploy_mode,omitempty"`    // static | docker
+	HostPort      int    `yaml:"host_port,omitempty"`      // allocated localhost port (18000-19999)
+	ContainerPort int    `yaml:"container_port,omitempty"` // port the app exposes inside container
+	ContainerName string `yaml:"container_name,omitempty"`
+	Platform      string `yaml:"platform,omitempty"`       // e.g. linux/amd64
 }
 
 // DefaultRegistryPath returns ~/.pushsite/sites.yaml

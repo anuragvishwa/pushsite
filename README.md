@@ -239,39 +239,60 @@ pushsite docker generate
 └── 4. Preview and write
 
 pushsite docker deploy
-├── 1. Build Docker image locally
-├── 2. Push to registry (or SSH transfer)
-├── 3. Pull image on server
-├── 4. Stop old container
-├── 5. Start new container
-└── 6. Nginx reverse-proxies to container
+├── 1. Detect server architecture (uname -m)
+├── 2. Build image for target platform (docker buildx)
+├── 3. Push to registry (or transfer via SSH)
+├── 4. Allocate localhost port (18000-19999) or reuse existing
+├── 5. Stop old container, start new on 127.0.0.1:<port>
+├── 6. Generate + deploy nginx reverse-proxy config
+├── 7. Test and reload nginx
+└── 8. Verify container health
 ```
 
-Example `docker generate` output:
+Example `docker deploy` output:
 ```
-🔍 Detecting project...
+🐳 Docker Deploy
 
-  Framework:       vite
-  Runtime:         static
-  Package manager: pnpm
-  Build:           pnpm run build → dist
-  Docker strategy: multi-stage static nginx
-  Confidence:      92% (high)
+  Domain:         agent.mysite.com
+  Deploy mode:    docker
+  Target arch:    linux/amd64
+  App port:       127.0.0.1:18080 (auto-allocated)
+  Container port: 80
+  Public entry:   nginx (80/443)
+  Transfer:       direct SSH
+  Container:      agent-frontend
 
-  Evidence:
-    [vite +30] found config file: vite.config.ts
-    [vite +15] found vite in devDeps: vite
-    [vite +10] build script contains 'vite'
+ℹ  Building Docker image: agent-frontend:20240119-150405 (platform: linux/amd64)
+ℹ  Uploading image (45 MB)...
+ℹ  Starting container: agent-frontend on 127.0.0.1:18080
+ℹ  Configuring nginx reverse-proxy (→ 127.0.0.1:18080)...
 
-✓ Generated Dockerfile
+✓ Deployed: agent-frontend:20240119-150405
+
+  Container: 127.0.0.1:18080 → :80
+  Nginx:     agent.mysite.com → 127.0.0.1:18080
 ```
+
+> **Key rules:**
+> - **Port 80/443 belong to nginx only** — containers never bind to public ports
+> - **Containers bind to `127.0.0.1:<high-port>`** — not accessible from outside
+> - **Ports auto-allocated** from 18000–19999. Saved in site registry + `pushsite.yaml` for reuse
+> - **Images built for target platform** — `docker buildx --platform linux/amd64` even on Apple Silicon
+
+Port allocation by app type:
+
+| App type | Container exposes | Host binding |
+|----------|-------------------|-------------|
+| Static (Vite, CRA, Astro) | 80 | `127.0.0.1:18xxx:80` |
+| Next.js SSR | 3000 | `127.0.0.1:18xxx:3000` |
+| Node SSR (Nuxt, Remix, SvelteKit) | 3000 | `127.0.0.1:18xxx:3000` |
 
 Two transfer modes:
 
 | Mode | Config | How it works |
 |------|--------|-------------|
 | **Registry** | `docker.registry: ghcr.io/user` | `docker push` → `docker pull` on server |
-| **SSH Transfer** | No registry set | `docker save \| gzip` → SFTP → `docker load` |
+| **SSH Transfer** | No registry set | `docker buildx --load` → `docker save \| gzip` → SFTP → `docker load` |
 
 Config for Docker:
 ```yaml
@@ -279,8 +300,10 @@ docker:
   enabled: true
   registry: ghcr.io/myuser   # Docker Hub, GHCR, ECR — or omit
   image: my-app
-  port: 80
   template: spa              # auto-detected: spa | nextjs | node-ssr
+  platform: linux/amd64      # auto-detected from server
+  host_port: 18080           # auto-allocated, persisted
+  container_port: 80         # auto-detected from framework
 ```
 
 ---
@@ -318,8 +341,10 @@ nginx:
 docker:
   enabled: true
   registry: ghcr.io/myuser
-  port: 80
-  template: spa            # auto-detected: spa | nextjs | node-ssr
+  template: spa              # auto-detected: spa | nextjs | node-ssr
+  platform: linux/amd64      # auto-detected from server
+  host_port: 18080           # auto-allocated, persisted
+  container_port: 80         # auto-detected from framework
 ```
 
 ---
@@ -344,12 +369,54 @@ docker:
 | Command | Description |
 |---------|-------------|
 | `pushsite docker generate` | Auto-detect project + generate optimized Dockerfile |
-| `pushsite docker setup` | Install Docker + nginx reverse-proxy on server |
-| `pushsite docker deploy` | Build → push → pull → run |
+| `pushsite docker setup` | Install Docker on server, detect architecture |
+| `pushsite docker deploy` | Build → transfer → health check → swap → nginx |
+| `pushsite docker deploy --cleanup-local` | Same as above, remove local image after success |
+| `pushsite docker deploy --keep-images 3` | Same as above, prune old server images after deploy |
 | `pushsite docker status` | Check container health |
 | `pushsite docker logs -n 50` | View container logs |
-| `pushsite docker cleanup` | Remove old images from server |
-| `pushsite docker rollback` | List images for rollback |
+| `pushsite docker cleanup -k 3` | Remove old images from server (keep 3) |
+| `pushsite docker rollback` | Roll back to previous image |
+
+### Deploy Lifecycle
+
+```
+pushsite docker deploy
+├── 1. Preflight  — detect server arch, allocate port
+├── 2. Build      — docker buildx --platform linux/amd64 --load
+├── 3. Transfer   — push to registry or docker save | gzip → SFTP
+├── 4. Load       — docker pull or docker load
+├── 5. Start new  — docker run -d --name app-new -p 127.0.0.1:18080:80
+├── 6. Health     — wait 2s, inspect State.Running
+│   ├── pass → remove old container, rename new → app
+│   └── fail → remove new, restart old, abort with logs
+├── 7. Nginx      — write config → nginx -t → reload
+├── 8. Cleanup    — remove temp tar on server
+│                 — optionally remove local image (--cleanup-local)
+└── 9. Persist    — save host_port to pushsite.yaml + site registry
+```
+
+**What stays, what gets removed:**
+
+| Where | What | After deploy |
+|-------|------|-------------|
+| Local machine | Docker image | Kept (use `--cleanup-local` to remove) |
+| Server | Old container | Removed after health check passes |
+| Server | New container | Running |
+| Server | Old images | Kept for rollback (use `docker cleanup -k 3` to prune) |
+| Server | Temp tar.gz | Always removed |
+
+**Rollback strategy:**
+
+```bash
+# Roll back to previous image (auto-detected)
+pushsite docker rollback
+
+# Or manually specify
+docker run -d --name my-app -p 127.0.0.1:18080:80 my-app:20240118-120000
+```
+
+Old images are kept by default so rollback is always possible. Run `pushsite docker cleanup` to prune when you're confident.
 
 ### Nginx & SSL
 
