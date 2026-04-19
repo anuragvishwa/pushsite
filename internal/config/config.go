@@ -39,9 +39,10 @@ type NginxConfig struct {
 }
 
 type DockerConfig struct {
-	Registry string `yaml:"registry"`
-	Image    string `yaml:"image"`
-	Port     int    `yaml:"port"`
+	Enabled  bool   `yaml:"enabled,omitempty"`
+	Registry string `yaml:"registry,omitempty"`
+	Image    string `yaml:"image,omitempty"`
+	Port     int    `yaml:"port,omitempty"`
 }
 
 func (c *Config) Validate() error {
