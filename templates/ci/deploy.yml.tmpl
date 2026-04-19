@@ -1,0 +1,51 @@
+name: Deploy {{.AppName}}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '{{.NodeVersion}}'
+
+jobs:
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: {{.BuildCmd}}
+        env:
+          NODE_ENV: production
+
+      - name: Deploy to server
+        uses: easingthemes/ssh-deploy@v5
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.{{.KeySecret}} }}
+          REMOTE_HOST: {{.Host}}
+          REMOTE_USER: {{.User}}
+          SOURCE: {{.BuildDir}}/
+          TARGET: {{.DeployPath}}/releases/${{ github.run_number }}
+
+      - name: Update symlink & reload nginx
+        uses: appleboy/ssh-action@v1
+        with:
+          host: {{.Host}}
+          username: {{.User}}
+          key: ${{ secrets.{{.KeySecret}} }}
+          script: |
+            ln -sfn {{.DeployPath}}/releases/${{ github.run_number }} {{.DeployPath}}/current
+            sudo nginx -t && sudo systemctl reload nginx
