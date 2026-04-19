@@ -1,18 +1,18 @@
 # Pushsite
 
-> Deploy frontend apps to EC2 instances in seconds.
+> Deploy frontend apps to EC2 in one command.
 
-Pushsite is a CLI tool for deploying frontend applications (Vite, Next.js, React, static sites) to EC2 instances. It handles nginx configuration, SSL certificates via certbot, environment variables, and supports both SSH and AWS SSM connections.
+Pushsite is a CLI tool for deploying frontend applications (Vite, Next.js, React, static sites) to EC2 instances. It auto-detects your project, generates config, handles nginx, SSL, and supports two deployment strategies: **static file upload** or **Docker containers**.
 
 ## Features
 
 - 🚀 **One-command deploy** — `pushsite deploy` builds and ships your app
-- 🔍 **Framework detection** — Auto-detects Vite, Next.js, React, or static sites
-- 🔑 **Dual connection** — SSH (with SFTP) or AWS SSM
+- 🔍 **Smart project scanner** — Auto-detects framework, package manager, Node version, env vars, and more from your project root
+- 🐳 **Docker deployment** — Build locally → push to registry → pull on server. Server stays clean.
 - 📁 **Zero-downtime releases** — Capistrano-style timestamped releases with symlinks
+- 🔑 **Dual connection** — SSH (with SFTP) or AWS SSM
 - ⏪ **Instant rollback** — `pushsite rollback` to revert in seconds
 - 🔒 **SSL management** — Let's Encrypt via certbot
-- 🐳 **Docker support** — Generate Dockerfiles and deploy containers
 - 🔄 **CI/CD generation** — Auto-generate GitHub Actions workflows
 - 📊 **Multi-site management** — Track and manage multiple projects
 - 🎨 **Beautiful CLI** — Colored output, spinners, progress bars
@@ -21,65 +21,27 @@ Pushsite is a CLI tool for deploying frontend applications (Vite, Next.js, React
 
 ## Installation
 
-### One-Line Install (macOS / Linux)
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/anuragvishwa/pushsite/main/install.sh | bash
 ```
 
-That's it. This will:
-1. Detect your OS and architecture automatically
-2. Download the right binary from GitHub Releases
-3. Install `pushsite` to `/usr/local/bin`
-4. No Go, git, or other dependencies needed
+That's it. Works on **macOS** and **Linux** (Intel & ARM). No Go, git, or dependencies needed.
 
-> **Windows?** Download the `.exe` directly from [GitHub Releases](https://github.com/anuragvishwa/pushsite/releases), or use WSL and the curl command above.
-
-### Other Install Methods
+> **Windows?** Download the `.exe` from [GitHub Releases](https://github.com/anuragvishwa/pushsite/releases), or use WSL.
 
 <details>
-<summary><b>Using Go</b></summary>
+<summary><b>Other install methods</b></summary>
 
 ```bash
+# Go install
 go install github.com/anuragvishwa/pushsite@latest
-```
 
-</details>
-
-<details>
-<summary><b>Build from source</b></summary>
-
-```bash
+# Build from source
 git clone https://github.com/anuragvishwa/pushsite.git
-cd pushsite
-make install
-```
+cd pushsite && make install
 
-Or manually:
-```bash
-CGO_ENABLED=0 go build -o pushsite .
-sudo mv pushsite /usr/local/bin/
-```
-
-</details>
-
-<details>
-<summary><b>Cross-compile for all platforms</b></summary>
-
-```bash
-git clone https://github.com/anuragvishwa/pushsite.git
-cd pushsite
-make cross
-```
-
-Creates binaries in `dist/`:
-```
-dist/
-├── pushsite-darwin-amd64       # macOS (Intel)
-├── pushsite-darwin-arm64       # macOS (Apple Silicon)
-├── pushsite-linux-amd64        # Linux (x86_64)
-├── pushsite-linux-arm64        # Linux (ARM)
-└── pushsite-windows-amd64.exe  # Windows
+# Cross-compile for all platforms
+make cross  # → dist/pushsite-{darwin,linux,windows}-{amd64,arm64}
 ```
 
 </details>
@@ -95,111 +57,218 @@ sudo rm /usr/local/bin/pushsite
 ## Quick Start
 
 ```bash
-# 1. Initialize a new project (generates pushsite.yaml)
+# 1. Init — scans your project and generates pushsite.yaml
 pushsite init
 
-# 2. Set up the server (installs Node.js, nginx, certbot)
+# 2. Setup — installs nginx & Node.js (or Docker) on the server
 pushsite setup
 
-# 3. Deploy your app
+# 3. Deploy — builds locally and ships to the server
 pushsite deploy
+```
+
+---
+
+## Smart Project Scanner
+
+When you run `pushsite init`, it scans your project root and **auto-detects everything**:
+
+```
+🔍 Scanning project...
+
+📋 Detected Project Info
+
+  Project: my-dashboard          ← from package.json
+  Framework: vite                ← from vite.config.ts
+  Package Manager: pnpm          ← from pnpm-lock.yaml
+  Node Version: >=20.0.0         ← from engines / .nvmrc
+  Build: pnpm run build → dist   ← correct PM + output dir
+  TypeScript: yes                ← from devDependencies
+  Git Branch: main               ← from .git/HEAD
+  Env Files: .env.example        ← found env file
+
+🌐 Server Details
+→ Everything else was auto-detected — just need your server info.
+
+? Domain: dashboard.mysite.com
+? Connection method: ssh
+? Server host: 52.1.2.3
+? SSH key path: ~/.ssh/mykey.pem
+
+✓ Created pushsite.yaml
+```
+
+| What it detects | Where it looks |
+|----------------|----------------|
+| Project name & version | `package.json` |
+| Framework | `vite.config.ts`, `next.config.js`, deps |
+| Package manager | `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb`, `package-lock.json` |
+| Node version | `.nvmrc`, `.node-version`, `.tool-versions`, `engines` |
+| Build command | Scripts + detected PM (`pnpm run build`) |
+| Environment variables | `.env.example`, `.env.sample` |
+| TypeScript | `devDependencies` |
+| Git info | `.git/HEAD`, `.git/config` |
+| Docker | `Dockerfile`, `docker-compose.yml` |
+| CI/CD | `.github/workflows`, `.gitlab-ci.yml` |
+| Config files | `tsconfig.json`, `tailwind.config.js`, `eslint`, etc. |
+
+Only your **server details and domain** need manual input — everything else is pre-filled.
+
+---
+
+## Deployment Strategies
+
+### Strategy 1: Static Deploy (default)
+
+Uploads build artifacts directly to the server. Best for static sites and SPAs.
+
+```bash
+pushsite deploy
+```
+
+```
+pushsite deploy
+├── 1. Detect framework (Vite/Next.js/React/static)
+├── 2. Run build locally (npm/pnpm/yarn run build)
+├── 3. Connect via SSH or SSM
+├── 4. Create timestamped release directory
+├── 5. Upload build artifacts via SFTP
+├── 6. Sync environment variables
+├── 7. Update symlink: current → new release
+├── 8. Reload nginx
+└── 9. Cleanup old releases
+```
+
+Server structure:
+```
+/var/www/my-app/
+├── releases/
+│   ├── 20240119120000/    ← previous
+│   └── 20240119150000/    ← current
+├── current → releases/20240119150000/
+└── shared/.env
+```
+
+### Strategy 2: Docker Deploy (recommended for production)
+
+Builds a Docker image locally, pushes to a registry, pulls on the server. **The server stays clean** — no Node.js, no build tools, just Docker.
+
+```bash
+# One-time setup
+pushsite docker generate   # Generate Dockerfile
+pushsite docker setup      # Install Docker + nginx on server
+
+# Deploy
+pushsite docker deploy
+```
+
+```
+pushsite docker deploy
+├── 1. Build Docker image locally
+├── 2. Push to registry (or SSH transfer)
+├── 3. Pull image on server
+├── 4. Stop old container
+├── 5. Start new container
+└── 6. Nginx reverse-proxies to container
+```
+
+Two modes:
+
+| Mode | Config | How it works |
+|------|--------|-------------|
+| **Registry** | `docker.registry: ghcr.io/user` | `docker push` → `docker pull` on server |
+| **SSH Transfer** | No registry set | `docker save \| gzip` → SFTP → `docker load` |
+
+Config for Docker:
+```yaml
+docker:
+  enabled: true
+  registry: ghcr.io/myuser   # Docker Hub, GHCR, ECR — or omit
+  image: my-app
+  port: 80
 ```
 
 ---
 
 ## Configuration
 
-Pushsite uses a `pushsite.yaml` file in your project root:
+`pushsite.yaml` — generated by `pushsite init`:
 
 ```yaml
 name: my-app
-framework: vite          # vite | nextjs | react | static
+framework: vite
 domain: myapp.example.com
 
 server:
   host: 52.x.x.x
   user: ubuntu
   key: ~/.ssh/my-key.pem
-  method: ssh            # ssh | ssm
-  # instance_id: i-xxx  # required for SSM
+  method: ssh              # ssh | ssm
 
 build:
-  command: npm run build
+  command: pnpm run build  # auto-detected
   output: dist
 
 env:
   NODE_ENV: production
+  VITE_API_URL: https://api.example.com  # from .env.example
 
 deploy:
   keep_releases: 5
-```
 
-Run `pushsite init` to generate this file interactively.
+nginx:
+  template: spa            # spa | ssr
+
+# Optional: Docker deployment
+docker:
+  enabled: true
+  registry: ghcr.io/myuser
+  port: 80
+```
 
 ---
 
 ## Commands
 
+### Core
+
 | Command | Description |
 |---------|-------------|
-| `pushsite init` | Interactive setup wizard |
+| `pushsite init` | Smart project scanner + config generation |
+| `pushsite init --yes` | Auto-detect everything, prompt only for server |
 | `pushsite setup` | Install Node.js, nginx, certbot on server |
-| `pushsite deploy` | Build and deploy your app |
-| `pushsite deploy --skip-build` | Deploy without rebuilding locally |
-| `pushsite deploy --build-only` | Build locally without deploying |
-| `pushsite rollback [release]` | Rollback to previous/specific release |
-| `pushsite releases` | List all releases on server |
+| `pushsite deploy` | Build and deploy (static files) |
+| `pushsite deploy --skip-build` | Deploy without rebuilding |
+| `pushsite rollback [release]` | Rollback to previous release |
+| `pushsite releases` | List all releases |
 | `pushsite status` | Check deployment status |
-| `pushsite nginx generate` | Generate nginx config |
-| `pushsite nginx deploy` | Deploy nginx config to server |
-| `pushsite nginx test` | Test nginx configuration |
-| `pushsite nginx reload` | Reload nginx |
-| `pushsite nginx show` | Show current nginx config |
-| `pushsite ssl obtain` | Obtain SSL certificate via Let's Encrypt |
-| `pushsite ssl renew` | Renew SSL certificates |
-| `pushsite ssl status` | Check certificate status |
-| `pushsite env set KEY=VALUE` | Set environment variables |
-| `pushsite env list` | List environment variables |
-| `pushsite env remove KEY` | Remove an environment variable |
-| `pushsite env push` | Push env vars to server |
-| `pushsite sites list` | List all registered projects |
-| `pushsite sites add` | Register current project |
-| `pushsite sites remove NAME` | Remove a project |
+
+### Docker
+
+| Command | Description |
+|---------|-------------|
 | `pushsite docker generate` | Generate a Dockerfile |
-| `pushsite docker deploy` | Deploy via Docker container |
+| `pushsite docker setup` | Install Docker + nginx reverse-proxy on server |
+| `pushsite docker deploy` | Build → push → pull → run |
+| `pushsite docker status` | Check container health |
+| `pushsite docker logs -n 50` | View container logs |
+| `pushsite docker cleanup` | Remove old images from server |
+| `pushsite docker rollback` | List images for rollback |
+
+### Nginx & SSL
+
+| Command | Description |
+|---------|-------------|
+| `pushsite nginx generate\|deploy\|test\|reload\|show` | Manage nginx config |
+| `pushsite ssl obtain\|renew\|status` | Manage SSL certificates |
+
+### Environment & Sites
+
+| Command | Description |
+|---------|-------------|
+| `pushsite env set\|list\|remove\|push` | Manage environment variables |
+| `pushsite sites list\|add\|remove` | Manage multiple projects |
 | `pushsite ci generate` | Generate GitHub Actions workflow |
-| `pushsite version` | Print version info |
-
----
-
-## How It Works
-
-### Deploy Flow
-
-```
-pushsite deploy
-├── 1. Detect framework (Vite/Next.js/React/static)
-├── 2. Run build locally (npm run build)
-├── 3. Connect to server (SSH or SSM)
-├── 4. Create timestamped release directory
-├── 5. Upload build artifacts via SFTP
-├── 6. Sync environment variables
-├── 7. Update current → new release symlink
-├── 8. Reload nginx
-└── 9. Cleanup old releases
-```
-
-### Server Directory Structure
-
-```
-/var/www/my-app/
-├── releases/
-│   ├── 20240119120000/    ← previous
-│   └── 20240119150000/    ← current deploy
-├── current → releases/20240119150000/
-└── shared/
-    └── .env
-```
 
 ---
 
@@ -226,57 +295,47 @@ server:
   instance_id: i-0123456789abcdef
 ```
 
-Requires:
-- AWS CLI configured (`aws configure`)
-- EC2 instance with SSM Agent and IAM role
-
 ---
 
 ## Framework Support
 
-| Framework | Build Output | Nginx Template | SSR |
-|-----------|-------------|----------------|-----|
-| Vite | `dist/` | SPA | No |
-| React (CRA) | `build/` | SPA | No |
-| Next.js | `.next/` | SSR (reverse proxy) | Yes |
-| Static | `.` or `dist/` | SPA | No |
+| Framework | Build Output | Nginx | SSR | Package Manager |
+|-----------|-------------|-------|-----|-----------------|
+| Vite | `dist/` | SPA | No | auto-detected |
+| React (CRA) | `build/` | SPA | No | auto-detected |
+| Next.js | `.next/` | Reverse proxy | Yes | auto-detected |
+| Static | `.` | SPA | No | — |
 
-Pushsite auto-detects your framework by checking for `vite.config.js`, `next.config.js`, and `package.json` dependencies.
+Pushsite detects your package manager from lock files:
+
+| Lock File | Manager |
+|-----------|---------|
+| `pnpm-lock.yaml` | pnpm |
+| `yarn.lock` | yarn |
+| `bun.lockb` | bun |
+| `package-lock.json` | npm |
 
 ---
 
 ## CI/CD
 
-Generate a GitHub Actions workflow:
-
 ```bash
 pushsite ci generate
 ```
 
-This creates `.github/workflows/deploy.yml` that automatically deploys on push to `main`.
+Creates `.github/workflows/deploy.yml` for auto-deploy on push to `main`.
 
-**Required GitHub Secrets:**
-- `SSH_PRIVATE_KEY` — Your server's SSH private key
+**Required GitHub Secret:** `SSH_PRIVATE_KEY`
 
 ---
 
 ## Development
 
 ```bash
-# Run tests
-make test
-
-# Run vet
-make vet
-
-# Build
-make build
-
-# Build with version
-make build VERSION=0.2.0
-
-# Install locally
-make install
+make build       # Build binary
+make test        # Run 53 unit tests
+make install     # Install to /usr/local/bin
+make cross       # Cross-compile all platforms
 ```
 
 ---
@@ -286,45 +345,42 @@ make install
 ```
 pushsite/
 ├── main.go                  # Entry point
-├── Makefile                 # Build/install targets
-├── install.sh               # One-line installer
-├── go.mod / go.sum          # Go module
+├── Makefile                 # Build/install/cross-compile
+├── install.sh               # curl | bash installer
 ├── cmd/                     # CLI commands (Cobra)
-│   ├── root.go              # Global flags
-│   ├── deploy.go            # pushsite deploy
-│   ├── init.go              # pushsite init
-│   ├── setup.go             # pushsite setup
-│   ├── nginx.go             # pushsite nginx *
-│   ├── ssl.go               # pushsite ssl *
-│   ├── env.go               # pushsite env *
-│   ├── rollback.go          # pushsite rollback
-│   ├── sites.go             # pushsite sites *
-│   ├── docker.go            # pushsite docker *
-│   ├── ci.go                # pushsite ci *
-│   ├── status.go            # pushsite status
-│   └── version.go           # pushsite version
+│   ├── root.go              # Global flags, config loading
+│   ├── init.go              # Smart scanner + wizard
+│   ├── deploy.go            # Static file deployment
+│   ├── docker.go            # Docker deployment (7 subcommands)
+│   ├── setup.go             # Server provisioning
+│   ├── nginx.go             # Nginx management
+│   ├── ssl.go               # SSL/certbot
+│   ├── env.go               # Environment variables
+│   ├── rollback.go          # Rollback + releases
+│   ├── sites.go             # Multi-site registry
+│   ├── ci.go                # GitHub Actions generation
+│   ├── status.go            # Deployment status
+│   └── version.go           # Version info
 ├── internal/                # Core packages
-│   ├── config/              # YAML config loading
+│   ├── scanner/             # Smart project scanner
+│   ├── config/              # YAML config
 │   ├── connection/          # Connection interface
 │   ├── connector/           # SSH/SSM factory
-│   ├── ssh/                 # SSH + SFTP client
-│   ├── ssm/                 # AWS SSM + S3 client
+│   ├── ssh/                 # SSH + SFTP
+│   ├── ssm/                 # AWS SSM + S3
 │   ├── deploy/              # Deployer + release manager
+│   ├── docker/              # Docker build/push/run
 │   ├── build/               # Local build runner
-│   ├── framework/           # Framework auto-detection
+│   ├── framework/           # Framework detection
 │   ├── nginx/               # Nginx config generator
-│   ├── ssl/                 # Certbot integration
-│   ├── provision/           # Server provisioning
-│   ├── env/                 # Env var management
-│   ├── sites/               # Multi-site registry
-│   ├── docker/              # Docker deployment
-│   ├── ci/                  # CI workflow generation
-│   ├── rollback/            # Rollback operations
+│   ├── ssl/                 # Certbot
+│   ├── provision/           # Server setup
+│   ├── env/                 # Env var manager
+│   ├── sites/               # Site registry
+│   ├── ci/                  # CI workflow gen
+│   ├── rollback/            # Rollback ops
 │   └── ui/                  # Colors, spinners, prompts
-└── templates/               # Config templates
-    ├── nginx/               # SPA + SSR nginx configs
-    ├── docker/              # Dockerfiles
-    └── ci/                  # GitHub Actions workflow
+└── templates/               # Nginx, Docker, CI templates
 ```
 
 ## License
